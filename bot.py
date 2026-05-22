@@ -15,8 +15,11 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID"))
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID"))
+
+OWNER_IDS = [
+    int(x.strip()) for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip()
+]
 
 ADMIN_IDS = [
     int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()
@@ -100,6 +103,7 @@ def load_json(path, default):
     if not os.path.exists(path):
         save_json(path, default)
         return default
+
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -110,16 +114,17 @@ def save_json(path, data):
 
 
 def is_owner(user_id):
-    return user_id == OWNER_ID
+    return user_id in OWNER_IDS
 
 
 def is_admin(user_id):
-    return user_id == OWNER_ID or user_id in ADMIN_IDS
+    return user_id in OWNER_IDS or user_id in ADMIN_IDS
 
 
 def next_order_id(orders):
     if not orders:
         return 1
+
     return max(int(k) for k in orders.keys()) + 1
 
 
@@ -133,10 +138,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def order_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["DGC", "Prems"], ["Skins", "Pilot"]]
+
     await update.message.reply_text(
         "Choose category:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
     )
+
     return ASKING_CATEGORY
 
 
@@ -202,11 +213,13 @@ async def get_order_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("QR payment image is not set yet.")
 
     await update.message.reply_text("After payment, please upload your receipt screenshot/photo.")
+
     return ASKING_RECEIPT
 
 
 async def get_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
     orders = load_json(ORDERS_FILE, {})
     order_id = next_order_id(orders)
 
@@ -262,6 +275,7 @@ async def get_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     context.user_data.clear()
+
     return ConversationHandler.END
 
 
@@ -272,6 +286,7 @@ async def track_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.replace("#", "").strip()
+
     orders = load_json(ORDERS_FILE, {})
 
     if raw not in orders:
@@ -295,32 +310,44 @@ async def get_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setprice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
-        return
+        await update.message.reply_text("You are not allowed to change pricelists.")
+        return ConversationHandler.END
 
     if not context.args or context.args[0].lower() not in ["dgc", "prems", "skins", "pilot"]:
         await update.message.reply_text("Usage: /setprice dgc")
         return ConversationHandler.END
 
     context.user_data["price_category"] = context.args[0].lower()
-    await update.message.reply_text(f"Send new {context.args[0].upper()} pricelist text now.")
+
+    await update.message.reply_text(
+        f"Send new {context.args[0].upper()} pricelist text now."
+    )
+
     return WAITING_PRICE
 
 
 async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = context.user_data["price_category"]
+
     settings = load_json(SETTINGS_FILE, {"prices": {}, "qr": None})
     settings["prices"][category] = update.message.text
+
     save_json(SETTINGS_FILE, settings)
 
     await update.message.reply_text(f"✅ {category.upper()} pricelist updated.")
+
+    context.user_data.clear()
+
     return ConversationHandler.END
 
 
 async def setqr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
-        return
+        await update.message.reply_text("You are not allowed to change the QR code.")
+        return ConversationHandler.END
 
     await update.message.reply_text("Send new QR image now.")
+
     return WAITING_QR
 
 
@@ -334,31 +361,40 @@ async def save_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_QR
 
     settings = load_json(SETTINGS_FILE, {"prices": {}, "qr": None})
+
     settings["qr"] = {
         "file_id": file_id,
         "caption": update.message.caption or "",
     }
+
     save_json(SETTINGS_FILE, settings)
 
     await update.message.reply_text("✅ QR updated.")
+
+    context.user_data.clear()
+
     return ConversationHandler.END
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
     await query.answer()
 
     if not is_admin(query.from_user.id):
         return
 
     action, order_id = query.data.split(":")
+
     orders = load_json(ORDERS_FILE, {})
 
     if order_id not in orders:
         return
 
     status = "processing" if action == "process" else "done"
+
     orders[order_id]["status"] = status
+
     save_json(ORDERS_FILE, orders)
 
     user_id = orders[order_id]["user_id"]
@@ -369,12 +405,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📌 Order #{order_id} is now processing."
 
     await context.bot.send_message(chat_id=user_id, text=msg)
+
     await query.edit_message_text(f"✅ Order #{order_id} updated to {status}.")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("Cancelled.", reply_markup=ReplyKeyboardRemove())
+
+    await update.message.reply_text(
+        "Cancelled.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
     return ConversationHandler.END
 
 
@@ -392,12 +434,27 @@ def run_bot():
             CommandHandler("setqr", setqr_cmd),
         ],
         states={
-            ASKING_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_category)],
-            ASKING_FORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_order_form)],
-            ASKING_RECEIPT: [MessageHandler(filters.ALL & ~filters.COMMAND, get_receipt)],
-            ASKING_TRACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_track)],
-            WAITING_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_price)],
-            WAITING_QR: [MessageHandler((filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND, save_qr)],
+            ASKING_CATEGORY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, choose_category)
+            ],
+            ASKING_FORM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_order_form)
+            ],
+            ASKING_RECEIPT: [
+                MessageHandler(filters.ALL & ~filters.COMMAND, get_receipt)
+            ],
+            ASKING_TRACK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_track)
+            ],
+            WAITING_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_price)
+            ],
+            WAITING_QR: [
+                MessageHandler(
+                    (filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND,
+                    save_qr,
+                )
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
@@ -408,6 +465,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("Pearl Tracker running...")
+
     app.run_polling(close_loop=False)
 
 
